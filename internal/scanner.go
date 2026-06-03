@@ -6,7 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 type Match struct {
@@ -18,6 +20,15 @@ type Match struct {
 type compiledRule struct {
 	name string
 	re   *regexp.Regexp
+}
+
+type fileDiffJob struct {
+	fileName string
+	lines    []string
+}
+
+type scanResult struct {
+	matches []Match
 }
 
 func ScanStagedChanges(config *Config) ([]Match, error) {
@@ -35,7 +46,7 @@ func ScanStagedChanges(config *Config) ([]Match, error) {
 		return nil, nil
 	}
 
-	return analyzeDiff(out.String(), config.Rules, config.Exclude)
+	return analyzeDiffParallel(out.String(), config.Rules, config.Exclude)
 }
 
 func compileRules(rules []Rule) ([]compiledRule, error) {
@@ -75,21 +86,64 @@ func isExcluded(filename string, patterns []string) bool {
 	return false
 }
 
-func analyzeDiff(diff string, rules []Rule, exclude []string) ([]Match, error) {
+func analyzeDiffParallel(diff string, rules []Rule, exclude []string) ([]Match, error) {
 	compiledRules, err := compileRules(rules)
 	if err != nil {
 		return nil, err
 	}
 
-	var matches []Match
-	lines := strings.Split(diff, "\n")
-	currentFile := ""
+	jobsList := parseDiffIntoJobs(diff, exclude)
+	if len(jobsList) == 0 {
+		return nil, nil
+	}
+
+	numWorkers := runtime.NumCPU()
+	if numWorkers > len(jobsList) {
+		numWorkers = len(jobsList)
+	}
+
+	jobsChan := make(chan fileDiffJob, len(jobsList))
+	resultsChan := make(chan scanResult, len(jobsList))
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go worker(jobsChan, resultsChan, compiledRules, &wg)
+	}
+
+	for _, job := range jobsList {
+		jobsChan <- job
+	}
+	close(jobsChan)
+
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	var allMatches []Match
+	for res := range resultsChan {
+		if len(res.matches) > 0 {
+			allMatches = append(allMatches, res.matches...)
+		}
+	}
+
+	return allMatches, nil
+}
+
+func parseDiffIntoJobs(diff string, exclude []string) []fileDiffJob {
+	var jobs []fileDiffJob
+
+	normalizedDiff := strings.ReplaceAll(diff, "\r\n", "\n")
+	lines := strings.Split(normalizedDiff, "\n")
+
+	var currentJob fileDiffJob
+	var active bool
 	skipCurrentFile := false
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "+++ b/") {
-			currentFile = strings.TrimPrefix(line, "+++ b/")
-			skipCurrentFile = isExcluded(currentFile, exclude)
+			currentJob, active, skipCurrentFile = processHeaderLine(line, exclude, currentJob, active, skipCurrentFile, &jobs)
 			continue
 		}
 
@@ -97,17 +151,53 @@ func analyzeDiff(diff string, rules []Rule, exclude []string) ([]Match, error) {
 			continue
 		}
 
-		if skipCurrentFile || currentFile == "" {
+		if skipCurrentFile || !active {
 			continue
 		}
 
-		if isLineAddition(line) {
-			cleanLine := strings.TrimPrefix(line, "+")
-			matches = append(matches, checkRulesOnLine(cleanLine, currentFile, compiledRules)...)
-		}
+		currentJob.lines = append(currentJob.lines, line)
 	}
 
-	return matches, nil
+	if active && !skipCurrentFile {
+		jobs = append(jobs, currentJob)
+	}
+
+	return jobs
+}
+
+func processHeaderLine(line string, exclude []string, currentJob fileDiffJob, active bool, skipCurrentFile bool, jobs *[]fileDiffJob) (fileDiffJob, bool, bool) {
+	if active && !skipCurrentFile {
+		*jobs = append(*jobs, currentJob)
+	}
+
+	fileName := strings.TrimPrefix(line, "+++ b/")
+	nextSkip := isExcluded(fileName, exclude)
+
+	if nextSkip {
+		return fileDiffJob{}, false, true
+	}
+
+	nextJob := fileDiffJob{
+		fileName: fileName,
+		lines:    make([]string, 0, 16),
+	}
+
+	return nextJob, true, false
+}
+
+func worker(jobs <-chan fileDiffJob, results chan<- scanResult, compiledRules []compiledRule, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for job := range jobs {
+		var workerMatches []Match
+		for _, line := range job.lines {
+			if isLineAddition(line) {
+				cleanLine := strings.TrimPrefix(line, "+")
+				workerMatches = append(workerMatches, checkRulesOnLine(cleanLine, job.fileName, compiledRules)...)
+			}
+		}
+		results <- scanResult{matches: workerMatches}
+	}
 }
 
 func isLineAddition(line string) bool {
