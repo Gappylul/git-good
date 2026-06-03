@@ -2,4 +2,4 @@ dist/
 bin/
 git-good.yaml
 .DS_Store
-Thumbs.db
+Thumbs.db.idea/
