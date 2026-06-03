@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -15,6 +17,25 @@ type WebHookPayload struct {
 	Matches   []Match `json:"matches"`
 }
 
+func getRepoName() string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	remote := strings.TrimSpace(string(out))
+
+	remote = strings.TrimSuffix(remote, ".git")
+
+	if idx := strings.LastIndex(remote, "/"); idx != -1 {
+		return remote[idx+1:]
+	}
+	if idx := strings.LastIndex(remote, ":"); idx != -1 {
+		return remote[idx+1:]
+	}
+	return remote
+}
+
 func SendWebhook(url string, matches []Match) (err error) {
 	if url == "" {
 		return nil
@@ -23,6 +44,7 @@ func SendWebhook(url string, matches []Match) (err error) {
 	payload := WebHookPayload{
 		Event:     "secret_detected",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		RepoName:  getRepoName(),
 		Matches:   matches,
 	}
 
@@ -48,7 +70,7 @@ func SendWebhook(url string, matches []Match) (err error) {
 	}
 	defer func() {
 		closeErr := resp.Body.Close()
-		if err != nil {
+		if err == nil {
 			err = closeErr
 		}
 	}()

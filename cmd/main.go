@@ -70,7 +70,13 @@ func printUsage() {
 }
 
 func handleInit() {
-	if _, err := os.Stat(internal.DefaultConfigPath); err == nil {
+	configPath, err := internal.DefaultConfigPath()
+	if err != nil {
+		fmt.Printf("Failed to resolve git root: %v\n", err)
+		os.Exit(1)
+	}
+
+	if _, err = os.Stat(configPath); err == nil {
 		fmt.Println("git-good.yaml already exists in this directory.")
 	} else {
 		if err = internal.GenerateDefaultConfig(); err != nil {
@@ -91,9 +97,15 @@ func handleApply() {
 	}
 	fmt.Printf("🍰 git-good.yaml verified successfully! Loaded %d custom rules.\n", len(config.Rules))
 
-	gitHooksDir := filepath.Join(".git", "hooks")
+	gitRoot, err := internal.GitRoot()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	gitHooksDir := filepath.Join(gitRoot, ".git", "hooks")
 	if _, err = os.Stat(gitHooksDir); os.IsNotExist(err) {
-		fmt.Println("Error: Directory '.git/hooks' not found. Are you sure you're in the root of a Git repository?")
+		fmt.Println("Error: Directory '.git/hooks' not found. Are you sure you're in a Git repository?")
 		os.Exit(1)
 	}
 
@@ -104,6 +116,8 @@ func handleApply() {
 		fmt.Printf("Failed to resolve binary location: %v\n", err)
 		os.Exit(1)
 	}
+
+	binaryPath = filepath.ToSlash(binaryPath)
 
 	hookContent := fmt.Sprintf("#!/bin/sh\n\"%s\" run-hook\n", binaryPath)
 

@@ -1,9 +1,11 @@
 package internal
 
 import (
-	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,16 +27,29 @@ type Config struct {
 	Rules    []Rule   `yaml:"rules"`
 }
 
-const DefaultConfigPath = "git-good.yaml"
+const DefaultConfigFilename = "git-good.yaml"
+
+func DefaultConfigPath() (string, error) {
+	root, err := GitRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, DefaultConfigFilename), nil
+}
 
 func GenerateDefaultConfig() error {
+	path, err := DefaultConfigPath()
+	if err != nil {
+		return err
+	}
+
 	defaultConfig := Config{
 		Version: "1",
 		Settings: Settings{
 			FailOnMatch: true,
-			WebhookURL:  "https://your-webhook-url-here.com",
+			WebhookURL:  "",
 		},
-		Exclude: []string{"*.png, node_modules/*, go.sum"},
+		Exclude: []string{"*.png", "node_modules/*", "go.sum"},
 		Rules: []Rule{
 			{Name: "AWS Access Key", Pattern: "AKIA[0-9A-Z]{16}"},
 			{Name: "Generic Secret String", Pattern: `(?i)(password|secret|api_key|passwd)\s*=\s*['"][^'"]+['"]`},
@@ -46,28 +61,36 @@ func GenerateDefaultConfig() error {
 		return err
 	}
 
-	return os.WriteFile(DefaultConfigPath, data, 0644)
+	return os.WriteFile(path, data, 0644)
+}
+
+func parseConfig(data []byte) (*Config, error) {
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
 }
 
 func LoadConfig() (*Config, error) {
-	data, err := os.ReadFile(DefaultConfigPath)
+	path, err := DefaultConfigPath()
 	if err != nil {
 		return nil, err
 	}
 
-	var config Config
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-
-	if err = decoder.Decode(&config); err != nil {
-		return nil, fmt.Errorf("invalid configuration structure: %w", err)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
 
-	for _, rule := range config.Rules {
-		if rule.Name == "" || rule.Pattern == "" {
-			return nil, fmt.Errorf("rule validation failed: both 'name' and 'pattern' are required fields")
-		}
-	}
+	return parseConfig(data)
+}
 
-	return &config, nil
+func GitRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("could not determine git root (are you inside a git repo?): %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
