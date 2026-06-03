@@ -1,0 +1,30 @@
+version: 3
+
+vars:
+  BINARY_NAME: git-good
+  MAIN_PATH: ./cmd/
+  VERSION: '$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")'
+  COMMIT: '$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")'
+  BUILD_TIME: '$(date -u +"%Y-%m-%dT%H:%M:%SZ")'
+  LDFLAGS: '-s -w -X main.Version={{.VERSION}} -X main.Commit={{.COMMIT}} -X main.BuildTime={{.BUILD_TIME}}'
+
+tasks:
+  build:
+    desc: Build optimized production binary for the current host architecture
+    summary: |
+      Compiles the source code with linker flags to strip out symbols 
+      and inject compilation metadata directly into global variables.
+    cmds:
+      - mkdir -p dist
+      - CGO_ENABLED=0 go build -ldflags="{{.LDFLAGS}}" -o dist/{{.BINARY_NAME}} {{.MAIN_PATH}}
+    silent: false
+
+  test:
+    desc: Run standard test suites with the race detector enabled
+    cmds:
+      - go test -v -race -timeout 30s ./...
+
+  clean:
+    desc: Scrub built binaries and temporary system files
+    cmds:
+      - rm -rf dist/
